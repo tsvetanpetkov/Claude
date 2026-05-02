@@ -15,19 +15,16 @@ on:
         required: false
         default: "4"
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   download:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -40,6 +37,7 @@ jobs:
             echo "::error::FMP_API_KEY secret is not set. Add it under Settings → Secrets and variables → Actions."
             exit 1
           fi
+          echo "FMP_API_KEY is set."
 
       - name: Download transcripts
         env:
@@ -60,7 +58,7 @@ jobs:
           find transcripts/ -type f 2>/dev/null | sort || echo "(no files found)"
 
       - name: Upload transcripts as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: earnings-transcripts-${{ github.run_id }}
           path: transcripts/
