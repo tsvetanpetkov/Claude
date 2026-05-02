@@ -21,15 +21,23 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: pip install requests
+
+      - name: Check API key is set
+        run: |
+          if [ -z "${{ secrets.FMP_API_KEY }}" ]; then
+            echo "::error::FMP_API_KEY secret is not set. Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "FMP_API_KEY is set."
 
       - name: Download transcripts
         env:
@@ -43,9 +51,16 @@ jobs:
             python download_earnings_transcripts.py --limit "$LIMIT" --output-dir transcripts
           fi
 
+      - name: Show downloaded files
+        if: always()
+        run: |
+          echo "--- transcripts directory ---"
+          find transcripts/ -type f 2>/dev/null | sort || echo "(no files found)"
+
       - name: Upload transcripts as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: earnings-transcripts-${{ github.run_id }}
           path: transcripts/
           retention-days: 90
+          if-no-files-found: error
