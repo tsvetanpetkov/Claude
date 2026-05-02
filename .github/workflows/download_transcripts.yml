@@ -29,33 +29,16 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
-
-      - name: Check API key is set
-        run: |
-          if [ -z "${{ secrets.FMP_API_KEY }}" ]; then
-            echo "::error::FMP_API_KEY secret is not set. Add it under Settings → Secrets and variables → Actions."
-            exit 1
-          fi
-          echo "FMP_API_KEY is set."
+        run: pip install requests beautifulsoup4
 
       - name: Download transcripts
-        env:
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
-          set -e
           TICKERS="${{ github.event.inputs.tickers }}"
           LIMIT="${{ github.event.inputs.limit || '4' }}"
           if [ -n "$TICKERS" ]; then
             python download_earnings_transcripts.py $TICKERS --limit "$LIMIT" --output-dir transcripts
           else
             python download_earnings_transcripts.py --limit "$LIMIT" --output-dir transcripts
-          fi
-          FILE_COUNT=$(find transcripts/ -type f 2>/dev/null | wc -l)
-          echo "Files saved: $FILE_COUNT"
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "::error::No transcripts were saved. Check the API key and subscription tier above."
-            exit 1
           fi
 
       - name: Show downloaded files
@@ -65,7 +48,7 @@ jobs:
           find transcripts/ -type f 2>/dev/null | sort || echo "(no files found)"
 
       - name: Upload transcripts as artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: earnings-transcripts-${{ github.run_id }}
           path: transcripts/
