@@ -43,12 +43,19 @@ jobs:
         env:
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
+          set -e
           TICKERS="${{ github.event.inputs.tickers }}"
           LIMIT="${{ github.event.inputs.limit || '4' }}"
           if [ -n "$TICKERS" ]; then
             python download_earnings_transcripts.py $TICKERS --limit "$LIMIT" --output-dir transcripts
           else
             python download_earnings_transcripts.py --limit "$LIMIT" --output-dir transcripts
+          fi
+          FILE_COUNT=$(find transcripts/ -type f 2>/dev/null | wc -l)
+          echo "Files saved: $FILE_COUNT"
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::No transcripts were saved. Check the API key and subscription tier above."
+            exit 1
           fi
 
       - name: Show downloaded files
