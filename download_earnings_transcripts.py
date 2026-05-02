@@ -19,19 +19,25 @@ DEFAULT_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 
 
+def _get(url: str, params: dict) -> list[dict]:
+    response = requests.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    # FMP returns a dict with "Error Message" when the endpoint requires a paid plan
+    if isinstance(data, dict):
+        msg = data.get("Error Message") or data.get("message") or repr(data)
+        raise RuntimeError(f"FMP API error: {msg}")
+    return data
+
+
 def list_available_transcripts(ticker: str, api_key: str) -> list[dict]:
     url = f"{FMP_BASE_URL}/earning_call_transcript/{ticker}"
-    response = requests.get(url, params={"apikey": api_key}, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    return _get(url, {"apikey": api_key})
 
 
 def fetch_transcript(ticker: str, year: int, quarter: int, api_key: str) -> list[dict]:
     url = f"{FMP_BASE_URL}/earning_call_transcript/{ticker}"
-    params = {"year": year, "quarter": quarter, "apikey": api_key}
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    return _get(url, {"year": year, "quarter": quarter, "apikey": api_key})
 
 
 def save_transcript(ticker_dir: Path, ticker: str, entry: dict) -> str | None:
@@ -72,7 +78,7 @@ def download_transcripts(
 
         try:
             available = list_available_transcripts(ticker, api_key)
-        except requests.HTTPError as e:
+        except (requests.HTTPError, RuntimeError) as e:
             print(f"  Error: {e}")
             continue
 
@@ -91,7 +97,7 @@ def download_transcripts(
                 try:
                     results = fetch_transcript(ticker, year, quarter, api_key)
                     entry = results[0] if results else entry
-                except (requests.HTTPError, IndexError):
+                except (requests.HTTPError, RuntimeError, IndexError):
                     pass
                 time.sleep(delay)
 
