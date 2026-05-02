@@ -1,0 +1,51 @@
+name: Download Earnings Transcripts
+
+on:
+  schedule:
+    # Runs the 15th of January, April, July, October — after each earnings season
+    - cron: "0 9 15 1,4,7,10 *"
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Space-separated ticker symbols (leave blank for defaults: AAPL MSFT GOOGL AMZN META)"
+        required: false
+        default: ""
+      limit:
+        description: "Max transcripts per company"
+        required: false
+        default: "4"
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Download transcripts
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: |
+          TICKERS="${{ github.event.inputs.tickers }}"
+          LIMIT="${{ github.event.inputs.limit || '4' }}"
+          if [ -n "$TICKERS" ]; then
+            python download_earnings_transcripts.py $TICKERS --limit "$LIMIT" --output-dir transcripts
+          else
+            python download_earnings_transcripts.py --limit "$LIMIT" --output-dir transcripts
+          fi
+
+      - name: Upload transcripts as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: earnings-transcripts-${{ github.run_id }}
+          path: transcripts/
+          retention-days: 90
