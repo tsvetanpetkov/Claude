@@ -1,121 +1,177 @@
 #!/usr/bin/env python3
 """
-Download earnings call transcripts for public companies.
-
-Uses the Financial Modeling Prep (FMP) API. A free API key is available at:
-https://financialmodelingprep.com/developer/docs/
-
-Set your key via the FMP_API_KEY environment variable or --api-key argument.
+Download earnings call transcripts from The Motley Fool (no API key required).
 """
 
-import os
+import re
 import sys
 import time
 import argparse
+import xml.etree.ElementTree as ET
 import requests
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+RSS_URL = "https://www.fool.com/feeds/index.aspx?id=earnings-call-transcripts"
+SEARCH_URL = "https://www.fool.com/search/"
+BASE_URL = "https://www.fool.com"
 
 
-def _get(url: str, params: dict) -> list[dict]:
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    # FMP returns a dict with "Error Message" when the endpoint requires a paid plan
-    if isinstance(data, dict):
-        msg = data.get("Error Message") or data.get("message") or repr(data)
-        raise RuntimeError(f"FMP API error: {msg}")
-    return data
+def find_transcript_urls(ticker: str, limit: int) -> list[dict]:
+    """Return transcript metadata from the Motley Fool RSS feed, filtered by ticker."""
+    resp = requests.get(RSS_URL, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+
+    root = ET.fromstring(resp.content)
+    matches = []
+    ticker_pattern = re.compile(rf"\b{re.escape(ticker)}\b", re.IGNORECASE)
+
+    for item in root.iter("item"):
+        title = item.findtext("title") or ""
+        link = item.findtext("link") or ""
+        pub_date = item.findtext("pubDate") or ""
+
+        if ticker_pattern.search(title):
+            matches.append({"title": title.strip(), "url": link.strip(), "date": pub_date.strip()})
+            if len(matches) >= limit:
+                break
+
+    # Fall back to site search if RSS didn't have enough results
+    if len(matches) < limit:
+        matches.extend(_search_transcripts(ticker, limit - len(matches), seen={m["url"] for m in matches}))
+
+    return matches[:limit]
 
 
-def list_available_transcripts(ticker: str, api_key: str) -> list[dict]:
-    url = f"{FMP_BASE_URL}/earning_call_transcript/{ticker}"
-    return _get(url, {"apikey": api_key})
+def _search_transcripts(ticker: str, limit: int, seen: set) -> list[dict]:
+    params = {"q": f"{ticker} earnings call transcript", "resultsperpage": str(limit + 5)}
+    try:
+        resp = requests.get(SEARCH_URL, params=params, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "transcript" in href.lower() and ticker.lower() in href.lower():
+            url = href if href.startswith("http") else BASE_URL + href
+            if url not in seen:
+                seen.add(url)
+                results.append({"title": a.get_text(strip=True), "url": url, "date": ""})
+                if len(results) >= limit:
+                    break
+    return results
 
 
-def fetch_transcript(ticker: str, year: int, quarter: int, api_key: str) -> list[dict]:
-    url = f"{FMP_BASE_URL}/earning_call_transcript/{ticker}"
-    return _get(url, {"year": year, "quarter": quarter, "apikey": api_key})
+def scrape_article(url: str) -> str | None:
+    """Fetch a Motley Fool article and extract the body text."""
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
 
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-def save_transcript(ticker_dir: Path, ticker: str, entry: dict) -> str | None:
-    year = entry.get("year")
-    quarter = entry.get("quarter")
-    date = entry.get("date", "unknown date")
-    content = entry.get("content", "").strip()
+    # Try progressively broader content selectors
+    container = None
+    for selector in [
+        {"class": re.compile(r"article-body", re.I)},
+        {"class": re.compile(r"content", re.I)},
+    ]:
+        container = soup.find("div", selector)
+        if container:
+            break
+    if not container:
+        container = soup.find("article") or soup.find("main") or soup.find("body")
 
-    if not content:
+    if not container:
         return None
 
-    filename = ticker_dir / f"{ticker}_Q{quarter}_{year}.txt"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"Ticker:  {ticker}\n")
-        f.write(f"Period:  Q{quarter} {year}\n")
-        f.write(f"Date:    {date}\n")
-        f.write("=" * 72 + "\n\n")
-        f.write(content)
-        f.write("\n")
-
-    return str(filename)
+    paragraphs = container.find_all(["p", "h2", "h3"])
+    text = "\n\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+    return text if len(text) > 300 else None
 
 
 def download_transcripts(
     tickers: list[str],
     output_dir: str,
-    api_key: str,
     limit: int = 4,
-    delay: float = 0.5,
-) -> None:
+    delay: float = 1.5,
+) -> int:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    total_saved = 0
 
     for ticker in tickers:
-        print(f"\n{ticker}: fetching available transcripts...")
+        print(f"\n{ticker}: searching Motley Fool for transcripts...")
         ticker_dir = output_path / ticker
         ticker_dir.mkdir(exist_ok=True)
 
         try:
-            available = list_available_transcripts(ticker, api_key)
-        except (requests.HTTPError, RuntimeError) as e:
-            print(f"  Error: {e}")
+            entries = find_transcript_urls(ticker, limit)
+        except Exception as e:
+            print(f"  Error fetching transcript list: {e}")
             continue
 
-        if not available:
-            print(f"  No transcripts found.")
+        if not entries:
+            print(f"  No transcripts found for {ticker}.")
             continue
 
+        print(f"  Found {len(entries)} candidate(s).")
         saved = 0
-        for entry in available[:limit]:
-            year = entry.get("year")
-            quarter = entry.get("quarter")
 
-            # The list endpoint may already include content; if not, fetch individually.
-            content = entry.get("content", "")
-            if not content:
-                try:
-                    results = fetch_transcript(ticker, year, quarter, api_key)
-                    entry = results[0] if results else entry
-                except (requests.HTTPError, RuntimeError, IndexError):
-                    pass
+        for i, entry in enumerate(entries):
+            url = entry["url"]
+            title = entry["title"] or f"transcript_{i+1}"
+            date = entry["date"]
+
+            try:
+                content = scrape_article(url)
+            except requests.RequestException as e:
+                print(f"  Skipped ({e}): {url}")
                 time.sleep(delay)
+                continue
 
-            path = save_transcript(ticker_dir, ticker, entry)
-            if path:
-                print(f"  Saved Q{quarter} {year} → {path}")
-                saved += 1
-            else:
-                print(f"  Skipped Q{quarter} {year} (empty content)")
+            if not content:
+                print(f"  Skipped (no content): {url}")
+                time.sleep(delay)
+                continue
 
+            filename = ticker_dir / f"{ticker}_transcript_{i+1:02d}.txt"
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"Ticker:  {ticker}\n")
+                f.write(f"Title:   {title}\n")
+                f.write(f"Date:    {date}\n")
+                f.write(f"Source:  {url}\n")
+                f.write("=" * 72 + "\n\n")
+                f.write(content)
+                f.write("\n")
+
+            print(f"  Saved → {filename}")
+            saved += 1
+            total_saved += 1
             time.sleep(delay)
 
         print(f"  {saved} transcript(s) saved for {ticker}.")
 
+    return total_saved
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download earnings call transcripts for public companies.",
+        description="Download earnings call transcripts from The Motley Fool.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -123,60 +179,26 @@ def main() -> None:
         nargs="*",
         default=DEFAULT_TICKERS,
         metavar="TICKER",
-        help="One or more ticker symbols (e.g. AAPL MSFT TSLA)",
+        help="Ticker symbols (e.g. AAPL MSFT TSLA)",
     )
-    parser.add_argument(
-        "--output-dir",
-        default="transcripts",
-        help="Directory where transcripts will be saved",
-    )
-    parser.add_argument(
-        "--api-key",
-        default=os.environ.get("FMP_API_KEY"),
-        help="Financial Modeling Prep API key (or set FMP_API_KEY env var)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=4,
-        metavar="N",
-        help="Maximum number of transcripts to download per company",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=0.5,
-        metavar="SECONDS",
-        help="Seconds to wait between API requests",
-    )
+    parser.add_argument("--output-dir", default="transcripts", help="Output directory")
+    parser.add_argument("--limit", type=int, default=4, metavar="N", help="Max transcripts per company")
+    parser.add_argument("--delay", type=float, default=1.5, metavar="SECONDS", help="Delay between requests")
 
     args = parser.parse_args()
-
-    if not args.api_key:
-        print("Error: an FMP API key is required.")
-        print("  Get a free key at: https://financialmodelingprep.com/developer/docs/")
-        print("  Then run:  export FMP_API_KEY=your_key_here")
-        print("  Or pass:   --api-key your_key_here")
-        sys.exit(1)
-
     tickers = [t.upper().strip() for t in args.tickers if t.strip()]
     if not tickers:
         print("Error: no tickers specified.")
         sys.exit(1)
 
     print(f"Downloading transcripts for: {', '.join(tickers)}")
-    print(f"Output directory: {args.output_dir}/")
-    print(f"Limit per company: {args.limit} quarters\n")
+    print(f"Source: The Motley Fool (no API key required)\n")
 
-    download_transcripts(
-        tickers=tickers,
-        output_dir=args.output_dir,
-        api_key=args.api_key,
-        limit=args.limit,
-        delay=args.delay,
-    )
+    saved = download_transcripts(tickers, args.output_dir, args.limit, args.delay)
+    print(f"\nDone. {saved} transcript(s) saved under ./{args.output_dir}/")
 
-    print(f"\nDone. Transcripts saved under ./{args.output_dir}/")
+    if saved == 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
