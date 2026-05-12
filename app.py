@@ -1,5 +1,4 @@
 import streamlit as st
-import duckdb
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -323,33 +322,6 @@ def _pg_engine():
     return create_engine(url)
 
 
-@st.cache_data
-def _load_taxi_df():
-    return pd.read_sql("SELECT * FROM trips", _pg_engine())
-
-
-@st.cache_data
-def _load_stocks_df():
-    return pd.read_sql("SELECT * FROM stock_prices", _pg_engine())
-
-
-@st.cache_data
-def _load_ecommerce_df():
-    return pd.read_sql("SELECT * FROM ecommerce_clickstream", _pg_engine())
-
-
-def _get_duckdb(db_key):
-    """Return a DuckDB connection with the dataset registered as a table."""
-    con = duckdb.connect()
-    if db_key == "nyc_taxi":
-        con.register("trips", _load_taxi_df())
-    elif db_key == "stocks":
-        con.register("stock_prices", _load_stocks_df())
-    elif db_key == "ecommerce":
-        con.register("ecommerce_clickstream", _load_ecommerce_df())
-    return con
-
-
 # ── Database registry ─────────────────────────────────────────────────────────
 DATABASES = {
     "nyc_taxi": {
@@ -397,31 +369,32 @@ HIST_COLS = {
 }
 
 # ── Queries per database ──────────────────────────────────────────────────────
+@st.cache_data
 def load_main_metric(db_key):
-    con = _get_duckdb(db_key)
+    engine = _pg_engine()
 
     if db_key == "nyc_taxi":
-        df = con.execute("""
+        df = pd.read_sql("""
             SELECT tpep_pickup_datetime::DATE AS date, COUNT(*) AS trips
             FROM trips
             WHERE tpep_pickup_datetime >= '2025-01-01' AND tpep_pickup_datetime < '2026-01-01'
             GROUP BY date ORDER BY date
-        """).df()
+        """, engine)
         df.columns = ["date", "value"]
         return df, "Trips per Day", "Trips"
 
     elif db_key == "stocks":
-        df = con.execute("""
+        df = pd.read_sql("""
             SELECT trade_date AS date, ticker,
                    ROUND(AVG(close), 2) AS avg_close
             FROM stock_prices
             GROUP BY trade_date, ticker
             ORDER BY trade_date
-        """).df()
+        """, engine)
         return df, "Avg Closing Price by Day", "Close Price (USD)"
 
     elif db_key == "ecommerce":
-        df = con.execute("""
+        df = pd.read_sql("""
             SELECT
                 make_date(year, month, day) AS date,
                 COUNT(DISTINCT session_id) AS sessions,
@@ -429,55 +402,51 @@ def load_main_metric(db_key):
                 ROUND(AVG(price), 2) AS avg_price
             FROM ecommerce_clickstream
             GROUP BY date ORDER BY date
-        """).df()
+        """, engine)
         return df, "Sessions per Day", "Sessions"
 
 
 @st.cache_data
 def load_histogram_data(db_key):
     """Load full (unlimited) data for histogram columns."""
-    con = _get_duckdb(db_key)
     cols = ", ".join(c for c, _ in HIST_COLS[db_key])
-    if db_key == "nyc_taxi":
-        return con.execute(f"SELECT {cols} FROM trips").df()
-    elif db_key == "stocks":
-        return con.execute(f"SELECT {cols} FROM stock_prices").df()
-    else:
-        return con.execute(f"SELECT {cols} FROM ecommerce_clickstream").df()
+    table = {"nyc_taxi": "trips", "stocks": "stock_prices", "ecommerce": "ecommerce_clickstream"}[db_key]
+    return pd.read_sql(f"SELECT {cols} FROM {table}", _pg_engine())
 
 
+@st.cache_data
 def load_faq_data(db_key):
-    con = _get_duckdb(db_key)
+    engine = _pg_engine()
 
     if db_key == "nyc_taxi":
-        busiest = con.execute("""
+        busiest = pd.read_sql("""
             SELECT tpep_pickup_datetime::DATE AS d, COUNT(*) AS n
             FROM trips GROUP BY d ORDER BY n DESC LIMIT 1
-        """).df()
+        """, engine)
 
-        payment = con.execute("""
+        payment = pd.read_sql("""
             SELECT CASE payment_type WHEN 1 THEN 'Credit Card' WHEN 2 THEN 'Cash'
                    ELSE 'Other' END AS method,
                    COUNT(*) AS trips, ROUND(AVG(tip_amount),2) AS avg_tip
             FROM trips
             WHERE payment_type IN (1,2)
             GROUP BY payment_type ORDER BY trips DESC
-        """).df()
+        """, engine)
 
-        airport = con.execute("""
+        airport = pd.read_sql("""
             SELECT ROUND(AVG(total_amount),2) AS avg_fare,
                    ROUND(AVG(trip_distance),2) AS avg_miles,
                    COUNT(*) AS trips
             FROM trips
-            WHERE PULocationID IN (132,138) OR DOLocationID IN (132,138)
-        """).df()
+            WHERE "PULocationID" IN (132,138) OR "DOLocationID" IN (132,138)
+        """, engine)
 
-        peak_hour = con.execute("""
+        peak_hour = pd.read_sql("""
             SELECT EXTRACT(hour FROM tpep_pickup_datetime)::INT AS hour,
                    COUNT(*) AS trips
             FROM trips
             GROUP BY hour ORDER BY trips DESC LIMIT 1
-        """).df()
+        """, engine)
 
         return [
             {
@@ -509,24 +478,25 @@ def load_faq_data(db_key):
         ]
 
     elif db_key == "stocks":
-        tickers = con.execute("SELECT DISTINCT ticker FROM stock_prices ORDER BY ticker").df()
+        engine = _pg_engine()
+        tickers = pd.read_sql("SELECT DISTINCT ticker FROM stock_prices ORDER BY ticker", engine)
         ticker_list = ", ".join(tickers["ticker"].tolist())
 
-        best = con.execute("""
+        best = pd.read_sql("""
             SELECT ticker,
                    ROUND((MAX(close)-MIN(close))*100.0/MIN(close),1) AS pct_gain
             FROM stock_prices GROUP BY ticker ORDER BY pct_gain DESC LIMIT 1
-        """).df()
+        """, engine)
 
-        vol = con.execute("""
+        vol = pd.read_sql("""
             SELECT ticker, ROUND(AVG(volume)/1e6,1) AS avg_vol_m
             FROM stock_prices GROUP BY ticker ORDER BY avg_vol_m DESC LIMIT 1
-        """).df()
+        """, engine)
 
-        spread = con.execute("""
+        spread = pd.read_sql("""
             SELECT ticker, ROUND(AVG(high-low),2) AS avg_spread
             FROM stock_prices GROUP BY ticker ORDER BY avg_spread DESC LIMIT 1
-        """).df()
+        """, engine)
 
         return [
             {
@@ -556,23 +526,24 @@ def load_faq_data(db_key):
         ]
 
     elif db_key == "ecommerce":
-        top_cat = con.execute("""
+        engine = _pg_engine()
+        top_cat = pd.read_sql("""
             SELECT page1_main_category AS cat, COUNT(*) AS views
             FROM ecommerce_clickstream GROUP BY cat ORDER BY views DESC LIMIT 1
-        """).df()
+        """, engine)
 
-        avg_pages = con.execute("""
+        avg_pages = pd.read_sql("""
             SELECT ROUND(AVG(c),1) AS avg_pages
-            FROM (SELECT session_id, COUNT(*) AS c FROM ecommerce_clickstream GROUP BY session_id)
-        """).df()
+            FROM (SELECT session_id, COUNT(*) AS c FROM ecommerce_clickstream GROUP BY session_id) sub
+        """, engine)
 
-        countries = con.execute("""
+        countries = pd.read_sql("""
             SELECT COUNT(DISTINCT country) AS n FROM ecommerce_clickstream
-        """).df()
+        """, engine)
 
-        avg_price = con.execute("""
+        avg_price = pd.read_sql("""
             SELECT ROUND(AVG(price),2) AS avg FROM ecommerce_clickstream
-        """).df()
+        """, engine)
 
         return [
             {
@@ -603,6 +574,7 @@ def load_faq_data(db_key):
 
 
 # ── Schema introspection ──────────────────────────────────────────────────────
+@st.cache_data
 def get_schema_description(db_key):
     if db_key == "nyc_taxi":
         return """Table: trips
@@ -614,8 +586,8 @@ Columns:
   trip_distance        DOUBLE    -- miles
   RatecodeID           DOUBLE    -- 1=Standard, 2=JFK, 3=Newark, 4=Nassau/Westchester, 5=Negotiated, 6=Group
   store_and_fwd_flag   VARCHAR
-  PULocationID         INTEGER   -- pickup taxi zone (1-263)
-  DOLocationID         INTEGER   -- dropoff taxi zone (1-263)
+  "PULocationID"       INTEGER   -- pickup taxi zone (1-263); always quote this column name
+  "DOLocationID"       INTEGER   -- dropoff taxi zone (1-263); always quote this column name
   payment_type         BIGINT    -- 1=Credit Card, 2=Cash, 3=No Charge, 4=Dispute
   fare_amount          DOUBLE
   extra                DOUBLE
@@ -628,20 +600,20 @@ Columns:
   airport_fee          DOUBLE
   cbd_congestion_fee   DOUBLE
 Date range: 2025-01-01 to 2025-01-31. ~500K rows total.
-Engine: DuckDB. Use FROM trips in SQL queries."""
+Engine: PostgreSQL. Use FROM trips in SQL queries."""
 
-    con = _get_duckdb(db_key)
+    engine = _pg_engine()
     if db_key == "stocks":
-        sample = con.execute("SELECT * FROM stock_prices LIMIT 3").fetchall()
-        tickers = [r[0] for r in con.execute("SELECT DISTINCT ticker FROM stock_prices").fetchall()]
+        sample = pd.read_sql("SELECT * FROM stock_prices LIMIT 3", engine).values.tolist()
+        tickers = pd.read_sql("SELECT DISTINCT ticker FROM stock_prices ORDER BY ticker", engine)["ticker"].tolist()
         return f"""Table: stock_prices
 Columns: id INTEGER, ticker VARCHAR, trade_date VARCHAR (YYYY-MM-DD), open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INTEGER
 Tickers available: {', '.join(tickers)}
 Sample rows: {sample}
-Engine: DuckDB. Use standard SQL."""
+Engine: PostgreSQL. Use standard SQL."""
 
     elif db_key == "ecommerce":
-        sample = con.execute("SELECT * FROM ecommerce_clickstream LIMIT 2").fetchall()
+        sample = pd.read_sql("SELECT * FROM ecommerce_clickstream LIMIT 2", engine).values.tolist()
         return f"""Table: ecommerce_clickstream
 Columns:
   year INTEGER, month INTEGER, day INTEGER  -- build date with make_date(year, month, day)
@@ -651,13 +623,13 @@ Columns:
   colour INTEGER, location INTEGER, model_photography INTEGER
   price DOUBLE, price2 DOUBLE  -- item price
   page INTEGER                 -- page number in session
-Engine: DuckDB. Use make_date(year, month, day) to build dates.
+Engine: PostgreSQL. Use make_date(year, month, day) to build dates.
 Sample rows: {sample}"""
 
 
 def run_sql(db_key, sql):
     """Execute SQL and return a DataFrame."""
-    return _get_duckdb(db_key).execute(sql).df()
+    return pd.read_sql(sql, _pg_engine())
 
 
 def ask_claude(db_key, question, api_key, history):
