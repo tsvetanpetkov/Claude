@@ -327,7 +327,7 @@ DATABASES = {
     "nyc_taxi": {
         "label": "NYC Yellow Taxi",
         "icon": "🚕",
-        "description": "500K rides from NYC Jan 2025",
+        "description": "Full year 2025 NYC yellow taxi data",
         "color": "#f0c8a0",
     },
     "stocks": {
@@ -411,7 +411,8 @@ def load_histogram_data(db_key):
     """Load full (unlimited) data for histogram columns."""
     cols = ", ".join(c for c, _ in HIST_COLS[db_key])
     table = {"nyc_taxi": "trips", "stocks": "stock_prices", "ecommerce": "ecommerce_clickstream"}[db_key]
-    return pd.read_sql(f"SELECT {cols} FROM {table}", _pg_engine())
+    limit = " LIMIT 500000" if db_key == "nyc_taxi" else ""
+    return pd.read_sql(f"SELECT {cols} FROM {table}{limit}", _pg_engine())
 
 
 @st.cache_data
@@ -599,7 +600,7 @@ Columns:
   congestion_surcharge DOUBLE
   airport_fee          DOUBLE
   cbd_congestion_fee   DOUBLE
-Date range: 2025-01-01 to 2025-01-31. ~500K rows total.
+Date range: 2025-01-01 to 2025-12-31. ~40M rows total (full year).
 Engine: PostgreSQL. Use FROM trips in SQL queries."""
 
     engine = _pg_engine()
